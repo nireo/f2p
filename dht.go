@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"net"
-	"net/rpc"
 	"sort"
-	"strconv"
 	"sync"
 )
 
@@ -111,6 +109,13 @@ type NodeInfo struct {
 	ID   NodeID
 	IP   net.IPAddr
 	Port uint16
+}
+
+type Transport interface {
+	Ping(contact NodeInfo, args PingArgs, reply *PingReply) error
+	Store(contact NodeInfo, args StoreArgs, reply *StoreReply) error
+	FindNode(contact NodeInfo, args FindNodeArgs, reply *FindNodeReply) error
+	FindValue(contact NodeInfo, args FindValueArgs, reply *FindValueReply) error
 }
 
 type RoutingTable struct {
@@ -243,10 +248,11 @@ func (rt *RoutingTable) FindClosest(target NodeID, limit int) []NodeInfo {
 
 // Node represents a single Kademlia participant and its local DHT state.
 type Node struct {
-	Info  NodeInfo
-	rt    *RoutingTable
-	store map[NodeID][]byte
-	mu    sync.RWMutex
+	Info      NodeInfo
+	rt        *RoutingTable
+	store     map[NodeID][]byte
+	transport Transport
+	mu        sync.RWMutex
 }
 
 func (n *Node) JoinNetwork(bootstrap NodeInfo) error {
@@ -258,8 +264,10 @@ func (n *Node) JoinNetwork(bootstrap NodeInfo) error {
 		return nil
 	}
 
+	transport := n.transportClient()
+
 	var pingReply PingReply
-	if err := n.call(bootstrap, "Node.Ping", PingArgs{Sender: n.localInfo()}, &pingReply); err != nil {
+	if err := transport.Ping(bootstrap, PingArgs{Sender: n.localInfo()}, &pingReply); err != nil {
 		return err
 	}
 
@@ -517,6 +525,9 @@ func (n *Node) ensureState() error {
 	if n.store == nil {
 		n.store = make(map[NodeID][]byte)
 	}
+	if n.transport == nil {
+		n.transport = NewRPCTransport(0)
+	}
 
 	return nil
 }
@@ -554,24 +565,20 @@ func (n *Node) setValue(key NodeID, value []byte) {
 	n.store[key] = cloneBytes(value)
 }
 
-func (n *Node) call(contact NodeInfo, method string, args any, reply any) error {
-	address, err := contactAddress(contact)
-	if err != nil {
-		return err
-	}
-
-	client, err := rpc.Dial("tcp", address)
-	if err != nil {
-		return err
-	}
-	defer client.Close()
-
-	return client.Call(method, args, reply)
+func (n *Node) transportClient() Transport {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.transport
 }
 
 func (n *Node) pingContact(contact NodeInfo) bool {
+	transport := n.transportClient()
+	if transport == nil {
+		return false
+	}
+
 	var reply PingReply
-	err := n.call(contact, "Node.Ping", PingArgs{Sender: n.localInfo()}, &reply)
+	err := transport.Ping(contact, PingArgs{Sender: n.localInfo()}, &reply)
 	if err != nil {
 		return false
 	}
@@ -581,15 +588,6 @@ func (n *Node) pingContact(contact NodeInfo) bool {
 	}
 	n.rt.Buckets[n.rt.GetBucketIndex(contact.ID)].AddOrUpdate(contact)
 	return true
-}
-
-// contactAddress constructs a network address string from the contact's IP and port.
-func contactAddress(contact NodeInfo) (string, error) {
-	if len(contact.IP.IP) == 0 || contact.Port == 0 {
-		return "", errors.New("contact has no reachable address")
-	}
-
-	return net.JoinHostPort(contact.IP.String(), strconv.Itoa(int(contact.Port))), nil
 }
 
 // cloneBytes creates a copy of the given byte slice to avoid sharing mutable state between nodes.
@@ -658,6 +656,7 @@ type findNodeResult struct {
 func (n *Node) findNodeBatch(batch []NodeInfo, target NodeID) []findNodeResult {
 	results := make([]findNodeResult, len(batch))
 	local := n.localInfo()
+	transport := n.transportClient()
 
 	var wg sync.WaitGroup
 	for i, contact := range batch {
@@ -666,7 +665,7 @@ func (n *Node) findNodeBatch(batch []NodeInfo, target NodeID) []findNodeResult {
 			defer wg.Done()
 
 			var reply FindNodeReply
-			err := n.call(contact, "Node.FindNode", FindNodeArgs{
+			err := transport.FindNode(contact, FindNodeArgs{
 				Sender: local,
 				Target: target,
 			}, &reply)
@@ -686,6 +685,7 @@ type storeResult struct {
 func (n *Node) storeBatch(batch []NodeInfo, key NodeID, value []byte) []storeResult {
 	results := make([]storeResult, len(batch))
 	local := n.localInfo()
+	transport := n.transportClient()
 
 	var wg sync.WaitGroup
 	for i, contact := range batch {
@@ -694,7 +694,7 @@ func (n *Node) storeBatch(batch []NodeInfo, key NodeID, value []byte) []storeRes
 			defer wg.Done()
 
 			var reply StoreReply
-			err := n.call(contact, "Node.Store", StoreArgs{
+			err := transport.Store(contact, StoreArgs{
 				Sender: local,
 				Key:    key,
 				Value:  cloneBytes(value),
@@ -718,6 +718,7 @@ type findValueResult struct {
 func (n *Node) findValueBatch(batch []NodeInfo, key NodeID) []findValueResult {
 	results := make([]findValueResult, len(batch))
 	local := n.localInfo()
+	transport := n.transportClient()
 
 	var wg sync.WaitGroup
 	for i, contact := range batch {
@@ -726,7 +727,7 @@ func (n *Node) findValueBatch(batch []NodeInfo, key NodeID) []findValueResult {
 			defer wg.Done()
 
 			var reply FindValueReply
-			err := n.call(contact, "Node.FindValue", FindValueArgs{
+			err := transport.FindValue(contact, FindValueArgs{
 				Sender: local,
 				Key:    key,
 			}, &reply)
