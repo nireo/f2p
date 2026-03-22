@@ -69,6 +69,36 @@ func (b *KBucket) Remove(id NodeID) bool {
 	return false
 }
 
+func (b *KBucket) Replace(id NodeID, contact NodeInfo) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	for i, c := range b.Contacts {
+		if c.ID == contact.ID {
+			copy(b.Contacts[i:], b.Contacts[i+1:])
+			b.Contacts[len(b.Contacts)-1] = contact
+			return true
+		}
+	}
+
+	for i, c := range b.Contacts {
+		if c.ID != id {
+			continue
+		}
+
+		copy(b.Contacts[i:], b.Contacts[i+1:])
+		b.Contacts[len(b.Contacts)-1] = contact
+		return true
+	}
+
+	if len(b.Contacts) < parameterK {
+		b.Contacts = append(b.Contacts, contact)
+		return true
+	}
+
+	return false
+}
+
 // IsFull reports whether the bucket already holds parameterK contacts.
 func (b *KBucket) IsFull() bool {
 	b.mu.RLock()
@@ -87,6 +117,7 @@ type RoutingTable struct {
 	LocalID NodeID
 	Buckets [160]KBucket
 	mu      sync.RWMutex
+	ping    func(NodeInfo) bool
 }
 
 // GetBucketIndex should return the index of the first differing bit between
@@ -118,7 +149,43 @@ func (rt *RoutingTable) UpdateContact(contact NodeInfo) {
 		return
 	}
 
-	_, _ = rt.Buckets[bucketIndex].AddOrUpdate(contact)
+	evicted, needsPing := rt.Buckets[bucketIndex].AddOrUpdate(contact)
+	if !needsPing {
+		return
+	}
+
+	ping := rt.pingFunc()
+	if ping == nil {
+		return
+	}
+
+	bucket := &rt.Buckets[bucketIndex]
+	if ping(evicted) {
+		bucket.AddOrUpdate(evicted)
+		return
+	}
+
+	bucket.Replace(evicted.ID, contact)
+}
+
+func (rt *RoutingTable) SetPingFunc(ping func(NodeInfo) bool) {
+	if rt == nil {
+		return
+	}
+
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	rt.ping = ping
+}
+
+func (rt *RoutingTable) pingFunc() func(NodeInfo) bool {
+	if rt == nil {
+		return nil
+	}
+
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	return rt.ping
 }
 
 // FindClosest should return up to limit contacts ordered by XOR distance to
@@ -435,6 +502,9 @@ func (n *Node) ensureState() error {
 	if n.rt == nil {
 		n.rt = &RoutingTable{LocalID: n.Info.ID}
 	}
+	if n.rt.pingFunc() == nil {
+		n.rt.SetPingFunc(n.pingContact)
+	}
 	if n.Info.ID == (NodeID{}) {
 		n.Info.ID = n.rt.LocalID
 	}
@@ -497,6 +567,20 @@ func (n *Node) call(contact NodeInfo, method string, args any, reply any) error 
 	defer client.Close()
 
 	return client.Call(method, args, reply)
+}
+
+func (n *Node) pingContact(contact NodeInfo) bool {
+	var reply PingReply
+	err := n.call(contact, "Node.Ping", PingArgs{Sender: n.localInfo()}, &reply)
+	if err != nil {
+		return false
+	}
+
+	if reply.Receiver.ID != (NodeID{}) {
+		contact = reply.Receiver
+	}
+	n.rt.Buckets[n.rt.GetBucketIndex(contact.ID)].AddOrUpdate(contact)
+	return true
 }
 
 // contactAddress constructs a network address string from the contact's IP and port.
