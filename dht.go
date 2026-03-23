@@ -116,6 +116,8 @@ type Transport interface {
 	Store(contact NodeInfo, args StoreArgs, reply *StoreReply) error
 	FindNode(contact NodeInfo, args FindNodeArgs, reply *FindNodeReply) error
 	FindValue(contact NodeInfo, args FindValueArgs, reply *FindValueReply) error
+	AddProvider(contact NodeInfo, args AddProviderArgs, reply *AddProviderReply) error
+	FindProviders(contact NodeInfo, args FindProvidersArgs, reply *FindProvidersReply) error
 }
 
 type RoutingTable struct {
@@ -251,8 +253,25 @@ type Node struct {
 	Info      NodeInfo
 	rt        *RoutingTable
 	store     map[NodeID][]byte
+	providers map[NodeID]map[NodeID]NodeInfo
 	transport Transport
 	mu        sync.RWMutex
+}
+
+func NewNode(info NodeInfo, transport Transport) *Node {
+	if transport == nil {
+		transport = NewRPCTransport(0)
+	}
+
+	node := &Node{
+		Info:      info,
+		rt:        &RoutingTable{LocalID: info.ID},
+		store:     make(map[NodeID][]byte),
+		providers: make(map[NodeID]map[NodeID]NodeInfo),
+		transport: transport,
+	}
+	node.rt.SetPingFunc(node.pingContact)
+	return node
 }
 
 func (n *Node) JoinNetwork(bootstrap NodeInfo) error {
@@ -408,6 +427,100 @@ func (n *Node) LookupValue(key NodeID) ([]byte, bool, error) {
 	return nil, false, firstErr
 }
 
+func (n *Node) AnnounceProvider(key NodeID) error {
+	if err := n.ensureState(); err != nil {
+		return err
+	}
+
+	provider := n.localInfo()
+	n.addProvider(key, provider)
+
+	closest := n.LookupNode(key)
+	if len(closest) == 0 {
+		return nil
+	}
+
+	var firstErr error
+	announcedRemotely := false
+	for _, result := range n.addProviderBatch(closest, key, provider) {
+		if result.err != nil {
+			if firstErr == nil {
+				firstErr = result.err
+			}
+			continue
+		}
+
+		announcedRemotely = true
+		n.rt.UpdateContact(result.contact)
+	}
+
+	if announcedRemotely || firstErr == nil {
+		return nil
+	}
+
+	return firstErr
+}
+
+func (n *Node) LookupProviders(key NodeID) ([]NodeInfo, error) {
+	if err := n.ensureState(); err != nil {
+		return nil, err
+	}
+
+	if providers := n.getProviders(key); len(providers) > 0 {
+		return providers, nil
+	}
+
+	closest := n.rt.FindClosest(key, parameterK)
+	queried := make(map[NodeID]struct{}, len(closest))
+	var firstErr error
+
+	for {
+		batch := make([]NodeInfo, 0, alpha)
+		for _, contact := range closest {
+			if _, ok := queried[contact.ID]; ok {
+				continue
+			}
+			queried[contact.ID] = struct{}{}
+			batch = append(batch, contact)
+			if len(batch) == alpha {
+				break
+			}
+		}
+
+		if len(batch) == 0 {
+			break
+		}
+
+		providers := make([]NodeInfo, 0, parameterK)
+		for _, result := range n.findProvidersBatch(batch, key) {
+			if result.err != nil {
+				if firstErr == nil {
+					firstErr = result.err
+				}
+				continue
+			}
+
+			n.rt.UpdateContact(result.contact)
+			if len(result.providers) > 0 {
+				providers = mergeProviders(providers, result.providers)
+				continue
+			}
+
+			for _, node := range result.nodes {
+				n.rt.UpdateContact(node)
+			}
+			closest = mergeClosest(key, n.rt.LocalID, closest, result.nodes, parameterK)
+		}
+
+		if len(providers) > 0 {
+			n.addProviders(key, providers)
+			return providers, nil
+		}
+	}
+
+	return nil, firstErr
+}
+
 type PingArgs struct {
 	Sender NodeInfo
 }
@@ -444,6 +557,24 @@ type FindValueReply struct {
 	Nodes []NodeInfo
 }
 
+type AddProviderArgs struct {
+	Sender   NodeInfo
+	Key      NodeID
+	Provider NodeInfo
+}
+
+type AddProviderReply struct{}
+
+type FindProvidersArgs struct {
+	Sender NodeInfo
+	Key    NodeID
+}
+
+type FindProvidersReply struct {
+	Providers []NodeInfo
+	Nodes     []NodeInfo
+}
+
 func (n *Node) Ping(args PingArgs, reply *PingReply) error {
 	if err := n.ensureState(); err != nil {
 		return err
@@ -454,8 +585,6 @@ func (n *Node) Ping(args PingArgs, reply *PingReply) error {
 	return nil
 }
 
-// Store should save a value locally for the requested key and refresh the
-// sender in the routing table.
 func (n *Node) Store(args StoreArgs, reply *StoreReply) error {
 	if err := n.ensureState(); err != nil {
 		return err
@@ -466,8 +595,6 @@ func (n *Node) Store(args StoreArgs, reply *StoreReply) error {
 	return nil
 }
 
-// FindNode should return the closest contacts this node knows about for the
-// requested target and refresh the sender in the routing table.
 func (n *Node) FindNode(args FindNodeArgs, reply *FindNodeReply) error {
 	if err := n.ensureState(); err != nil {
 		return err
@@ -478,8 +605,6 @@ func (n *Node) FindNode(args FindNodeArgs, reply *FindNodeReply) error {
 	return nil
 }
 
-// FindValue should return the value if present, otherwise it should return the
-// closest contacts so the caller can continue the lookup.
 func (n *Node) FindValue(args FindValueArgs, reply *FindValueReply) error {
 	if err := n.ensureState(); err != nil {
 		return err
@@ -495,6 +620,36 @@ func (n *Node) FindValue(args FindValueArgs, reply *FindValueReply) error {
 
 	reply.Found = false
 	reply.Value = nil
+	reply.Nodes = n.rt.FindClosest(args.Key, parameterK)
+	return nil
+}
+
+func (n *Node) AddProvider(args AddProviderArgs, reply *AddProviderReply) error {
+	if err := n.ensureState(); err != nil {
+		return err
+	}
+
+	n.rt.UpdateContact(args.Sender)
+	provider := args.Provider
+	if provider.ID == (NodeID{}) {
+		provider = args.Sender
+	}
+	n.addProvider(args.Key, provider)
+	return nil
+}
+
+func (n *Node) FindProviders(args FindProvidersArgs, reply *FindProvidersReply) error {
+	if err := n.ensureState(); err != nil {
+		return err
+	}
+
+	n.rt.UpdateContact(args.Sender)
+	reply.Providers = n.getProviders(args.Key)
+	if len(reply.Providers) > 0 {
+		reply.Nodes = nil
+		return nil
+	}
+
 	reply.Nodes = n.rt.FindClosest(args.Key, parameterK)
 	return nil
 }
@@ -524,6 +679,9 @@ func (n *Node) ensureState() error {
 	}
 	if n.store == nil {
 		n.store = make(map[NodeID][]byte)
+	}
+	if n.providers == nil {
+		n.providers = make(map[NodeID]map[NodeID]NodeInfo)
 	}
 	if n.transport == nil {
 		n.transport = NewRPCTransport(0)
@@ -563,6 +721,42 @@ func (n *Node) setValue(key NodeID, value []byte) {
 		n.store = make(map[NodeID][]byte)
 	}
 	n.store[key] = cloneBytes(value)
+}
+
+func (n *Node) getProviders(key NodeID) []NodeInfo {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	providerSet := n.providers[key]
+	if len(providerSet) == 0 {
+		return nil
+	}
+
+	providers := make([]NodeInfo, 0, len(providerSet))
+	for _, provider := range providerSet {
+		providers = append(providers, provider)
+	}
+	sortProviders(providers)
+	return providers
+}
+
+func (n *Node) addProvider(key NodeID, provider NodeInfo) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.providers == nil {
+		n.providers = make(map[NodeID]map[NodeID]NodeInfo)
+	}
+	if n.providers[key] == nil {
+		n.providers[key] = make(map[NodeID]NodeInfo)
+	}
+	n.providers[key][provider.ID] = provider
+}
+
+func (n *Node) addProviders(key NodeID, providers []NodeInfo) {
+	for _, provider := range providers {
+		n.addProvider(key, provider)
+	}
 }
 
 func (n *Node) transportClient() Transport {
@@ -645,6 +839,29 @@ func sortContactsByDistance(target NodeID, contacts []NodeInfo) {
 
 		return bytes.Compare(contacts[i].ID[:], contacts[j].ID[:]) < 0
 	})
+}
+
+func sortProviders(providers []NodeInfo) {
+	sort.SliceStable(providers, func(i, j int) bool {
+		return bytes.Compare(providers[i].ID[:], providers[j].ID[:]) < 0
+	})
+}
+
+func mergeProviders(current []NodeInfo, extra []NodeInfo) []NodeInfo {
+	mergedByID := make(map[NodeID]NodeInfo, len(current)+len(extra))
+	for _, provider := range current {
+		mergedByID[provider.ID] = provider
+	}
+	for _, provider := range extra {
+		mergedByID[provider.ID] = provider
+	}
+
+	merged := make([]NodeInfo, 0, len(mergedByID))
+	for _, provider := range mergedByID {
+		merged = append(merged, provider)
+	}
+	sortProviders(merged)
+	return merged
 }
 
 type findNodeResult struct {
@@ -737,6 +954,72 @@ func (n *Node) findValueBatch(batch []NodeInfo, key NodeID) []findValueResult {
 				found:   reply.Found,
 				nodes:   reply.Nodes,
 				err:     err,
+			}
+		}(i, contact)
+	}
+	wg.Wait()
+
+	return results
+}
+
+type addProviderResult struct {
+	contact NodeInfo
+	err     error
+}
+
+func (n *Node) addProviderBatch(batch []NodeInfo, key NodeID, provider NodeInfo) []addProviderResult {
+	results := make([]addProviderResult, len(batch))
+	local := n.localInfo()
+	transport := n.transportClient()
+
+	var wg sync.WaitGroup
+	for i, contact := range batch {
+		wg.Add(1)
+		go func(i int, contact NodeInfo) {
+			defer wg.Done()
+
+			var reply AddProviderReply
+			err := transport.AddProvider(contact, AddProviderArgs{
+				Sender:   local,
+				Key:      key,
+				Provider: provider,
+			}, &reply)
+			results[i] = addProviderResult{contact: contact, err: err}
+		}(i, contact)
+	}
+	wg.Wait()
+
+	return results
+}
+
+type findProvidersResult struct {
+	contact   NodeInfo
+	providers []NodeInfo
+	nodes     []NodeInfo
+	err       error
+}
+
+func (n *Node) findProvidersBatch(batch []NodeInfo, key NodeID) []findProvidersResult {
+	results := make([]findProvidersResult, len(batch))
+	local := n.localInfo()
+	transport := n.transportClient()
+
+	var wg sync.WaitGroup
+	for i, contact := range batch {
+		wg.Add(1)
+		go func(i int, contact NodeInfo) {
+			defer wg.Done()
+
+			var reply FindProvidersReply
+			err := transport.FindProviders(contact, FindProvidersArgs{
+				Sender: local,
+				Key:    key,
+			}, &reply)
+			results[i] = findProvidersResult{
+				contact:   contact,
+				providers: reply.Providers,
+				nodes:     reply.Nodes,
+				err:       err,
 			}
 		}(i, contact)
 	}

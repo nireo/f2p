@@ -38,6 +38,14 @@ func (t *RPCTransport) FindValue(contact NodeInfo, args FindValueArgs, reply *Fi
 	return t.call(contact, "Node.FindValue", args, reply)
 }
 
+func (t *RPCTransport) AddProvider(contact NodeInfo, args AddProviderArgs, reply *AddProviderReply) error {
+	return t.call(contact, "Node.AddProvider", args, reply)
+}
+
+func (t *RPCTransport) FindProviders(contact NodeInfo, args FindProvidersArgs, reply *FindProvidersReply) error {
+	return t.call(contact, "Node.FindProviders", args, reply)
+}
+
 func (t *RPCTransport) call(contact NodeInfo, method string, args any, reply any) error {
 	address, err := contactAddress(contact)
 	if err != nil {

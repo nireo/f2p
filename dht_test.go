@@ -233,6 +233,51 @@ func TestStoreValueAndLookupValueAcrossNetwork(t *testing.T) {
 	}
 }
 
+func TestAnnounceProviderAndLookupProvidersAcrossNetwork(t *testing.T) {
+	bootstrap, stopBootstrap := newRPCNode(t, testNodeID(0x10))
+	defer stopBootstrap()
+
+	peer, stopPeer := newRPCNode(t, testNodeID(0x20))
+	defer stopPeer()
+
+	provider, stopProvider := newRPCNode(t, testNodeID(0x30))
+	defer stopProvider()
+
+	reader, stopReader := newRPCNode(t, testNodeID(0x40))
+	defer stopReader()
+
+	bootstrap.rt.UpdateContact(peer.Info)
+	peer.rt.UpdateContact(bootstrap.Info)
+
+	if err := provider.JoinNetwork(bootstrap.Info); err != nil {
+		t.Fatalf("provider JoinNetwork returned error: %v", err)
+	}
+
+	contentID := testNodeID(0x24)
+	if err := provider.AnnounceProvider(contentID); err != nil {
+		t.Fatalf("AnnounceProvider returned error: %v", err)
+	}
+
+	if err := reader.JoinNetwork(bootstrap.Info); err != nil {
+		t.Fatalf("reader JoinNetwork returned error: %v", err)
+	}
+
+	providers, err := reader.LookupProviders(contentID)
+	if err != nil {
+		t.Fatalf("LookupProviders returned error: %v", err)
+	}
+	if !containsContact(providers, provider.Info.ID) {
+		t.Fatalf("LookupProviders missing provider %x", provider.Info.ID)
+	}
+
+	if cached := reader.getProviders(contentID); !containsContact(cached, provider.Info.ID) {
+		t.Fatalf("reader did not cache discovered providers")
+	}
+	if stored := bootstrap.getProviders(contentID); !containsContact(stored, provider.Info.ID) && !containsContact(peer.getProviders(contentID), provider.Info.ID) {
+		t.Fatalf("network did not retain provider record on closest peers")
+	}
+}
+
 func TestPingContactTimesOut(t *testing.T) {
 	contact, stop := newSlowPingServer(t, testNodeID(0x55), 250*time.Millisecond)
 	defer stop()
@@ -407,6 +452,8 @@ type mockTransport struct {
 	store         func(contact NodeInfo, args StoreArgs, reply *StoreReply) error
 	findNode      func(contact NodeInfo, args FindNodeArgs, reply *FindNodeReply) error
 	findValue     func(contact NodeInfo, args FindValueArgs, reply *FindValueReply) error
+	addProvider   func(contact NodeInfo, args AddProviderArgs, reply *AddProviderReply) error
+	findProviders func(contact NodeInfo, args FindProvidersArgs, reply *FindProvidersReply) error
 }
 
 func (m *mockTransport) Ping(contact NodeInfo, args PingArgs, reply *PingReply) error {
@@ -441,4 +488,18 @@ func (m *mockTransport) FindValue(contact NodeInfo, args FindValueArgs, reply *F
 		return errors.New("unexpected FindValue call")
 	}
 	return m.findValue(contact, args, reply)
+}
+
+func (m *mockTransport) AddProvider(contact NodeInfo, args AddProviderArgs, reply *AddProviderReply) error {
+	if m.addProvider == nil {
+		return errors.New("unexpected AddProvider call")
+	}
+	return m.addProvider(contact, args, reply)
+}
+
+func (m *mockTransport) FindProviders(contact NodeInfo, args FindProvidersArgs, reply *FindProvidersReply) error {
+	if m.findProviders == nil {
+		return errors.New("unexpected FindProviders call")
+	}
+	return m.findProviders(contact, args, reply)
 }
