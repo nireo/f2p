@@ -46,6 +46,10 @@ func (t *RPCTransport) FindProviders(contact NodeInfo, args FindProvidersArgs, r
 	return t.call(contact, "Node.FindProviders", args, reply)
 }
 
+func (t *RPCTransport) FetchChunk(contact NodeInfo, args FetchChunkArgs, reply *FetchChunkReply) error {
+	return t.call(contact, "Node.FetchChunk", args, reply)
+}
+
 func (t *RPCTransport) call(contact NodeInfo, method string, args any, reply any) error {
 	address, err := contactAddress(contact)
 	if err != nil {

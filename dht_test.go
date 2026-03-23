@@ -12,26 +12,26 @@ import (
 )
 
 func TestRoutingTableFindClosestOrdersByDistance(t *testing.T) {
-	localID := testNodeID(0x00)
+	localID := testKey(0x00)
 	rt := &RoutingTable{LocalID: localID}
 
 	contacts := []NodeInfo{
-		{ID: testNodeID(0x70)},
-		{ID: testNodeID(0x33)},
-		{ID: testNodeID(0x31)},
-		{ID: testNodeID(0x20)},
+		{ID: testKey(0x70)},
+		{ID: testKey(0x33)},
+		{ID: testKey(0x31)},
+		{ID: testKey(0x20)},
 		{ID: localID},
 	}
 	for _, contact := range contacts {
 		rt.UpdateContact(contact)
 	}
 
-	got := rt.FindClosest(testNodeID(0x30), 3)
+	got := rt.FindClosest(testKey(0x30), 3)
 	if len(got) != 3 {
 		t.Fatalf("expected 3 contacts, got %d", len(got))
 	}
 
-	want := []NodeID{testNodeID(0x31), testNodeID(0x33), testNodeID(0x20)}
+	want := []Key{testKey(0x31), testKey(0x33), testKey(0x20)}
 	for i, id := range want {
 		if got[i].ID != id {
 			t.Fatalf("closest[%d] = %x, want %x", i, got[i].ID, id)
@@ -40,7 +40,7 @@ func TestRoutingTableFindClosestOrdersByDistance(t *testing.T) {
 }
 
 func TestRoutingTableUpdateContactReplacesDeadOldest(t *testing.T) {
-	localID := testNodeID(0x00)
+	localID := testKey(0x00)
 	rt := &RoutingTable{LocalID: localID}
 
 	contacts := sameBucketContacts(0x80, parameterK)
@@ -48,13 +48,13 @@ func TestRoutingTableUpdateContactReplacesDeadOldest(t *testing.T) {
 		rt.UpdateContact(contact)
 	}
 
-	var pinged []NodeID
+	var pinged []Key
 	rt.SetPingFunc(func(contact NodeInfo) bool {
 		pinged = append(pinged, contact.ID)
 		return false
 	})
 
-	newContact := NodeInfo{ID: testNodeID(0xf0)}
+	newContact := NodeInfo{ID: testKey(0xf0)}
 	rt.UpdateContact(newContact)
 
 	if len(pinged) != 1 || pinged[0] != contacts[0].ID {
@@ -71,7 +71,7 @@ func TestRoutingTableUpdateContactReplacesDeadOldest(t *testing.T) {
 }
 
 func TestRoutingTableUpdateContactKeepsLiveOldest(t *testing.T) {
-	localID := testNodeID(0x00)
+	localID := testKey(0x00)
 	rt := &RoutingTable{LocalID: localID}
 
 	contacts := sameBucketContacts(0x80, parameterK)
@@ -79,13 +79,13 @@ func TestRoutingTableUpdateContactKeepsLiveOldest(t *testing.T) {
 		rt.UpdateContact(contact)
 	}
 
-	var pinged []NodeID
+	var pinged []Key
 	rt.SetPingFunc(func(contact NodeInfo) bool {
 		pinged = append(pinged, contact.ID)
 		return true
 	})
 
-	newContact := NodeInfo{ID: testNodeID(0xf0)}
+	newContact := NodeInfo{ID: testKey(0xf0)}
 	rt.UpdateContact(newContact)
 
 	if len(pinged) != 1 || pinged[0] != contacts[0].ID {
@@ -105,13 +105,13 @@ func TestRoutingTableUpdateContactKeepsLiveOldest(t *testing.T) {
 }
 
 func TestJoinNetworkDiscoversBootstrapPeers(t *testing.T) {
-	bootstrap, stopBootstrap := newRPCNode(t, testNodeID(0x10))
+	bootstrap, stopBootstrap := newRPCNode(t, testKey(0x10))
 	defer stopBootstrap()
 
-	peer, stopPeer := newRPCNode(t, testNodeID(0x20))
+	peer, stopPeer := newRPCNode(t, testKey(0x20))
 	defer stopPeer()
 
-	joiner, stopJoiner := newRPCNode(t, testNodeID(0x30))
+	joiner, stopJoiner := newRPCNode(t, testKey(0x30))
 	defer stopJoiner()
 
 	bootstrap.rt.UpdateContact(peer.Info)
@@ -134,8 +134,8 @@ func TestJoinNetworkDiscoversBootstrapPeers(t *testing.T) {
 }
 
 func TestJoinNetworkWithMockTransport(t *testing.T) {
-	bootstrap := NodeInfo{ID: testNodeID(0x10)}
-	discovered := NodeInfo{ID: testNodeID(0x20)}
+	bootstrap := NodeInfo{ID: testKey(0x10)}
+	discovered := NodeInfo{ID: testKey(0x20)}
 	transport := &mockTransport{
 		ping: func(contact NodeInfo, args PingArgs, reply *PingReply) error {
 			if contact.ID != bootstrap.ID {
@@ -158,7 +158,7 @@ func TestJoinNetworkWithMockTransport(t *testing.T) {
 	}
 
 	joiner := &Node{
-		Info: NodeInfo{ID: testNodeID(0x30)},
+		Info: NodeInfo{ID: testKey(0x30)},
 	}
 	joiner = NewNode(joiner.Info, transport)
 
@@ -182,16 +182,16 @@ func TestJoinNetworkWithMockTransport(t *testing.T) {
 }
 
 func TestStoreValueAndLookupValueAcrossNetwork(t *testing.T) {
-	bootstrap, stopBootstrap := newRPCNode(t, testNodeID(0x10))
+	bootstrap, stopBootstrap := newRPCNode(t, testKey(0x10))
 	defer stopBootstrap()
 
-	peer, stopPeer := newRPCNode(t, testNodeID(0x20))
+	peer, stopPeer := newRPCNode(t, testKey(0x20))
 	defer stopPeer()
 
-	writer, stopWriter := newRPCNode(t, testNodeID(0x30))
+	writer, stopWriter := newRPCNode(t, testKey(0x30))
 	defer stopWriter()
 
-	reader, stopReader := newRPCNode(t, testNodeID(0x40))
+	reader, stopReader := newRPCNode(t, testKey(0x40))
 	defer stopReader()
 
 	bootstrap.rt.UpdateContact(peer.Info)
@@ -201,7 +201,7 @@ func TestStoreValueAndLookupValueAcrossNetwork(t *testing.T) {
 		t.Fatalf("writer JoinNetwork returned error: %v", err)
 	}
 
-	key := testNodeID(0x22)
+	key := testKey(0x22)
 	value := []byte("hello kad")
 	if err := writer.StoreValue(key, value); err != nil {
 		t.Fatalf("StoreValue returned error: %v", err)
@@ -234,16 +234,16 @@ func TestStoreValueAndLookupValueAcrossNetwork(t *testing.T) {
 }
 
 func TestAnnounceProviderAndLookupProvidersAcrossNetwork(t *testing.T) {
-	bootstrap, stopBootstrap := newRPCNode(t, testNodeID(0x10))
+	bootstrap, stopBootstrap := newRPCNode(t, testKey(0x10))
 	defer stopBootstrap()
 
-	peer, stopPeer := newRPCNode(t, testNodeID(0x20))
+	peer, stopPeer := newRPCNode(t, testKey(0x20))
 	defer stopPeer()
 
-	provider, stopProvider := newRPCNode(t, testNodeID(0x30))
+	provider, stopProvider := newRPCNode(t, testKey(0x30))
 	defer stopProvider()
 
-	reader, stopReader := newRPCNode(t, testNodeID(0x40))
+	reader, stopReader := newRPCNode(t, testKey(0x40))
 	defer stopReader()
 
 	bootstrap.rt.UpdateContact(peer.Info)
@@ -253,7 +253,7 @@ func TestAnnounceProviderAndLookupProvidersAcrossNetwork(t *testing.T) {
 		t.Fatalf("provider JoinNetwork returned error: %v", err)
 	}
 
-	contentID := testNodeID(0x24)
+	contentID := testKey(0x24)
 	if err := provider.AnnounceProvider(contentID); err != nil {
 		t.Fatalf("AnnounceProvider returned error: %v", err)
 	}
@@ -279,10 +279,10 @@ func TestAnnounceProviderAndLookupProvidersAcrossNetwork(t *testing.T) {
 }
 
 func TestPingContactTimesOut(t *testing.T) {
-	contact, stop := newSlowPingServer(t, testNodeID(0x55), 250*time.Millisecond)
+	contact, stop := newSlowPingServer(t, testKey(0x55), 250*time.Millisecond)
 	defer stop()
 
-	node := NewNode(NodeInfo{ID: testNodeID(0x44)}, NewRPCTransport(50*time.Millisecond))
+	node := NewNode(NodeInfo{ID: testKey(0x44)}, NewRPCTransport(50*time.Millisecond))
 
 	started := time.Now()
 	if ok := node.pingContact(contact); ok {
@@ -293,7 +293,7 @@ func TestPingContactTimesOut(t *testing.T) {
 	}
 }
 
-func newRPCNode(t *testing.T, id NodeID) (*Node, func()) {
+func newRPCNode(t *testing.T, id Key) (*Node, func()) {
 	t.Helper()
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -348,7 +348,7 @@ func newRPCNode(t *testing.T, id NodeID) (*Node, func()) {
 	return node, stop
 }
 
-func newSlowPingServer(t *testing.T, id NodeID, delay time.Duration) (NodeInfo, func()) {
+func newSlowPingServer(t *testing.T, id Key, delay time.Duration) (NodeInfo, func()) {
 	t.Helper()
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -400,7 +400,7 @@ func newSlowPingServer(t *testing.T, id NodeID, delay time.Duration) (NodeInfo, 
 	return NodeInfo{ID: id, IP: net.IPAddr{IP: net.ParseIP(host)}, Port: uint16(port)}, stop
 }
 
-func containsContact(contacts []NodeInfo, id NodeID) bool {
+func containsContact(contacts []NodeInfo, id Key) bool {
 	for _, contact := range contacts {
 		if contact.ID == id {
 			return true
@@ -410,8 +410,8 @@ func containsContact(contacts []NodeInfo, id NodeID) bool {
 	return false
 }
 
-func testNodeID(b byte) NodeID {
-	var id NodeID
+func testKey(b byte) Key {
+	var id Key
 	id[0] = b
 	return id
 }
@@ -419,7 +419,7 @@ func testNodeID(b byte) NodeID {
 func sameBucketContacts(start byte, count int) []NodeInfo {
 	contacts := make([]NodeInfo, count)
 	for i := range count {
-		contacts[i] = NodeInfo{ID: testNodeID(start + byte(i))}
+		contacts[i] = NodeInfo{ID: testKey(start + byte(i))}
 	}
 	return contacts
 }
@@ -454,6 +454,7 @@ type mockTransport struct {
 	findValue     func(contact NodeInfo, args FindValueArgs, reply *FindValueReply) error
 	addProvider   func(contact NodeInfo, args AddProviderArgs, reply *AddProviderReply) error
 	findProviders func(contact NodeInfo, args FindProvidersArgs, reply *FindProvidersReply) error
+	fetchChunk    func(contact NodeInfo, args FetchChunkArgs, reply *FetchChunkReply) error
 }
 
 func (m *mockTransport) Ping(contact NodeInfo, args PingArgs, reply *PingReply) error {
@@ -502,4 +503,11 @@ func (m *mockTransport) FindProviders(contact NodeInfo, args FindProvidersArgs, 
 		return errors.New("unexpected FindProviders call")
 	}
 	return m.findProviders(contact, args, reply)
+}
+
+func (m *mockTransport) FetchChunk(contact NodeInfo, args FetchChunkArgs, reply *FetchChunkReply) error {
+	if m.fetchChunk == nil {
+		return errors.New("unexpected FetchChunk call")
+	}
+	return m.fetchChunk(contact, args, reply)
 }
